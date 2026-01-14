@@ -24,6 +24,12 @@ pub trait UpstreamAuth: Send + Sync {
     /// Get the authorization header value for upstream requests
     async fn get_auth_header(&self) -> Result<HeaderValue, AuthError>;
 
+    /// Get the header name to use for authentication.
+    /// Returns "x-api-key" for API key auth, "authorization" for Bearer token auth.
+    fn auth_header_name(&self) -> &'static str {
+        "x-api-key"
+    }
+
     /// Get any additional headers required for the upstream request
     async fn get_additional_headers(&self) -> Result<Vec<(String, HeaderValue)>, AuthError> {
         Ok(vec![])
@@ -155,6 +161,10 @@ impl UpstreamAuth for AzureAdAuth {
         HeaderValue::from_str(&header_value)
             .map_err(|e| AuthError::Config(format!("Invalid token format: {}", e)))
     }
+
+    fn auth_header_name(&self) -> &'static str {
+        "authorization"
+    }
 }
 
 /// Azure CLI credential authentication - uses `az account get-access-token`
@@ -179,6 +189,24 @@ impl AzureCliAuth {
     }
 
     async fn fetch_token(&self) -> Result<CachedToken, AuthError> {
+        // On Windows, we need to run az through cmd.exe to properly locate it
+        #[cfg(windows)]
+        let output = tokio::process::Command::new("cmd")
+            .args([
+                "/C",
+                "az",
+                "account",
+                "get-access-token",
+                "--scope",
+                &self.scope,
+                "--output",
+                "json",
+            ])
+            .output()
+            .await
+            .map_err(|e| AuthError::TokenAcquisition(format!("Failed to execute az cli: {}", e)))?;
+
+        #[cfg(not(windows))]
         let output = tokio::process::Command::new("az")
             .args([
                 "account",
@@ -256,6 +284,10 @@ impl UpstreamAuth for AzureCliAuth {
         let header_value = format!("Bearer {}", token);
         HeaderValue::from_str(&header_value)
             .map_err(|e| AuthError::Config(format!("Invalid token format: {}", e)))
+    }
+
+    fn auth_header_name(&self) -> &'static str {
+        "authorization"
     }
 }
 
