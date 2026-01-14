@@ -1,0 +1,6 @@
+/target
+/test
+config.toml
+CLAUDE.md
+.claude
+.env*

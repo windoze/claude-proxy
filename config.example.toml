@@ -1,0 +1,41 @@
+# Claude API Proxy Configuration Example
+
+# Server bind address (default: 0.0.0.0)
+bind_address = "0.0.0.0"
+
+# Server port (default: 8080)
+port = 8080
+
+# Upstream Claude API URL (default: https://api.anthropic.com)
+upstream_url = "https://api.anthropic.com"
+
+# API key that clients must provide to access this proxy
+# This is the key your clients will use to authenticate with your proxy
+client_api_key = "${DOWNSTREAM_API_KEY}"
+
+# Upstream authentication configuration
+# Choose ONE of the following options:
+
+# Option 1: Direct API Key authentication
+[upstream_auth]
+type = "api_key"
+api_key = "${UPSTREAM_API_KEY}"
+
+# Option 2: Azure AD (Entra ID) authentication with client secret
+# Uncomment and configure the following section to use Azure AD
+# Supports environment variable expansion using ${VAR_NAME} or $VAR_NAME syntax
+# [upstream_auth]
+# type = "azure_ad"
+# tenant_id = "${AZURE_TENANT_ID}"
+# client_id = "${AZURE_CLIENT_ID}"
+# client_secret = "${AZURE_CLIENT_SECRET}"
+# # Default scope for Microsoft AI Foundry
+# scope = "https://ai.azure.com/.default"
+
+# Option 3: Azure CLI credential authentication
+# Uses the credentials from `az login` - no secrets needed in config
+# Make sure you're logged in with: az login
+# [upstream_auth]
+# type = "azure_cli"
+# # Default scope for Microsoft AI Foundry
+# scope = "https://ai.azure.com/.default"
