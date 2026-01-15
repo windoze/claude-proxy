@@ -1,4 +1,4 @@
-# Claude API Proxy Configuration Example
+# Claude/OpenAI API Proxy Configuration Example
 
 # Server bind address (default: 0.0.0.0)
 bind_address = "0.0.0.0"
@@ -6,8 +6,15 @@ bind_address = "0.0.0.0"
 # Server port (default: 8080)
 port = 8080
 
-# Upstream Claude API URL (default: https://api.anthropic.com)
+# When using Claude official API
 upstream_url = "https://api.anthropic.com"
+
+# When using OpenAI official API
+# upstream_url = "https://api.openai.com"
+
+# When using Microsoft AI Foundry, you need to create a resource in Azure and deploy some models in the resource first.
+# With this configuration, the proxy can handle both Claude and OpenAI compatible requests and forward them to the Microsoft AI Foundry service.
+# upstream_url = "https://<your-resource-name>.services.ai.azure.com"
 
 # API key that clients must provide to access this proxy
 # This is the key your clients will use to authenticate with your proxy
@@ -21,6 +28,8 @@ client_api_key = "${DOWNSTREAM_API_KEY}"
 type = "api_key"
 api_key = "${UPSTREAM_API_KEY}"
 
+## Below options are for Microsoft AI Foundry only, none of Claude or OpenAI official APIs support AAD or Azure CLI authentication.
+
 # Option 2: Azure AD (Entra ID) authentication with client secret
 # Uncomment and configure the following section to use Azure AD
 # Supports environment variable expansion using ${VAR_NAME} or $VAR_NAME syntax
@@ -29,7 +38,7 @@ api_key = "${UPSTREAM_API_KEY}"
 # tenant_id = "${AZURE_TENANT_ID}"
 # client_id = "${AZURE_CLIENT_ID}"
 # client_secret = "${AZURE_CLIENT_SECRET}"
-# # Default scope for Microsoft AI Foundry
+# # Default scope for Microsoft AI Foundry, no need to change
 # scope = "https://ai.azure.com/.default"
 
 # Option 3: Azure CLI credential authentication
@@ -37,7 +46,7 @@ api_key = "${UPSTREAM_API_KEY}"
 # Make sure you're logged in with: az login
 # [upstream_auth]
 # type = "azure_cli"
-# # Default scope for Microsoft AI Foundry
+# # Default scope for Microsoft AI Foundry, no need to change
 # scope = "https://ai.azure.com/.default"
 
 # Logging configuration (optional)
