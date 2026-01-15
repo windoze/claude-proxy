@@ -3,6 +3,7 @@ use reqwest::header::HeaderValue;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 
 use crate::config::UpstreamAuthConfig;
 
@@ -189,6 +190,7 @@ impl AzureCliAuth {
     }
 
     async fn fetch_token(&self) -> Result<CachedToken, AuthError> {
+        info!("Acquiring token using Azure CLI for scope: {}", self.scope);
         // On Windows, we need to run az through cmd.exe to properly locate it
         #[cfg(windows)]
         let output = tokio::process::Command::new("cmd")
@@ -202,6 +204,9 @@ impl AzureCliAuth {
                 "--output",
                 "json",
             ])
+            // CREATE_NO_WINDOW
+            // See https://docs.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
+            .creation_flags(0x08000000)
             .output()
             .await
             .map_err(|e| AuthError::TokenAcquisition(format!("Failed to execute az cli: {}", e)))?;
@@ -222,6 +227,7 @@ impl AzureCliAuth {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("Azure CLI returned error: {}", stderr);
             return Err(AuthError::TokenAcquisition(format!(
                 "az cli failed: {}",
                 stderr
@@ -231,7 +237,8 @@ impl AzureCliAuth {
         let token_response: AzureCliTokenResponse = serde_json::from_slice(&output.stdout)
             .map_err(|e| {
                 AuthError::TokenAcquisition(format!("Failed to parse az cli output: {}", e))
-            })?;
+            })
+            .inspect_err(|e| error!("Failed to parse az cli output: {}", e))?;
 
         // Parse the expires_on timestamp (format: "2024-01-15 10:30:00.000000")
         let expires_at = chrono::NaiveDateTime::parse_from_str(
@@ -246,6 +253,8 @@ impl AzureCliAuth {
 
         // Subtract 60 seconds buffer
         let expires_at = expires_at - chrono::Duration::seconds(60);
+
+        debug!("Acquired token expiring at {}", expires_at);
 
         Ok(CachedToken {
             access_token: token_response.access_token,
