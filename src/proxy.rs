@@ -91,10 +91,7 @@ pub async fn proxy_handler(
 
     // Add the upstream authentication header using the appropriate header name
     let auth_header_name = state.upstream_auth.auth_header_name();
-    upstream_headers.insert(
-        HeaderName::from_static(auth_header_name),
-        auth_header,
-    );
+    upstream_headers.insert(HeaderName::from_static(auth_header_name), auth_header);
 
     // Get additional headers from auth provider
     match state.upstream_auth.get_additional_headers().await {

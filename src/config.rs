@@ -82,6 +82,61 @@ pub struct ProxyConfig {
 
     /// Upstream authentication configuration
     pub upstream_auth: UpstreamAuthConfig,
+
+    /// Logging configuration (optional)
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+/// Log rotation frequency
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogRotation {
+    /// Rotate logs hourly
+    Hourly,
+    /// Rotate logs daily (default)
+    #[default]
+    Daily,
+}
+
+/// Log level
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Trace level (most verbose)
+    Trace,
+    /// Debug level
+    Debug,
+    /// Info level (default)
+    #[default]
+    Info,
+    /// Warn level
+    Warn,
+    /// Error level (least verbose)
+    Error,
+}
+
+/// Logging configuration
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LoggingConfig {
+    /// Path to the log file directory. If not specified, logs are only written to stdout.
+    pub log_path: Option<String>,
+
+    /// Log rotation frequency: "hourly" or "daily" (default: "daily")
+    #[serde(default)]
+    pub rotation: LogRotation,
+
+    /// Log level: "trace", "debug", "info", "warn", or "error" (default: "info")
+    #[serde(default)]
+    pub level: LogLevel,
+
+    /// Prefix for log file names (default: "claude-proxy")
+    #[serde(default = "default_log_prefix")]
+    pub log_prefix: String,
+}
+
+fn default_log_prefix() -> String {
+    "claude-proxy".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -133,6 +188,7 @@ fn default_azure_scope() -> String {
 }
 
 impl ProxyConfig {
+    #[allow(dead_code)]
     pub fn from_env() -> Result<Self, config::ConfigError> {
         let config = config::Config::builder()
             .add_source(
