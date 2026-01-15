@@ -12,6 +12,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
 
 use crate::auth::UpstreamAuth;
+use crate::middleware::ClientAuthenticated;
 
 /// Shared state for the proxy
 #[derive(Clone)]
@@ -64,17 +65,12 @@ pub async fn proxy_handler(
     // Build the upstream URL
     let upstream_url = format!("{}{}{}", state.upstream_url, path, query);
 
-    // Get auth header for upstream
-    let auth_header = match state.upstream_auth.get_auth_header().await {
-        Ok(header) => header,
-        Err(e) => {
-            error!("Failed to get upstream auth header: {}", e);
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!("Authentication error: {}", e)))
-                .unwrap();
-        }
-    };
+    // Check if the client is authenticated
+    let client_authenticated = request
+        .extensions()
+        .get::<ClientAuthenticated>()
+        .map(|auth| auth.0)
+        .unwrap_or(false);
 
     // Build headers for upstream request
     let mut upstream_headers = HeaderMap::new();
@@ -89,22 +85,39 @@ pub async fn proxy_handler(
         }
     }
 
-    // Add the upstream authentication header using the appropriate header name
-    let auth_header_name = state.upstream_auth.auth_header_name();
-    upstream_headers.insert(HeaderName::from_static(auth_header_name), auth_header);
+    // Only add upstream authentication if the client provided a valid API key
+    if client_authenticated {
+        // Get auth header for upstream
+        let auth_header = match state.upstream_auth.get_auth_header().await {
+            Ok(header) => header,
+            Err(e) => {
+                error!("Failed to get upstream auth header: {}", e);
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from(format!("Authentication error: {}", e)))
+                    .unwrap();
+            }
+        };
 
-    // Get additional headers from auth provider
-    match state.upstream_auth.get_additional_headers().await {
-        Ok(additional) => {
-            for (name, value) in additional {
-                if let Ok(header_name) = HeaderName::try_from(name) {
-                    upstream_headers.insert(header_name, value);
+        // Add the upstream authentication header using the appropriate header name
+        let auth_header_name = state.upstream_auth.auth_header_name();
+        upstream_headers.insert(HeaderName::from_static(auth_header_name), auth_header);
+
+        // Get additional headers from auth provider
+        match state.upstream_auth.get_additional_headers().await {
+            Ok(additional) => {
+                for (name, value) in additional {
+                    if let Ok(header_name) = HeaderName::try_from(name) {
+                        upstream_headers.insert(header_name, value);
+                    }
                 }
             }
+            Err(e) => {
+                error!("Failed to get additional auth headers: {}", e);
+            }
         }
-        Err(e) => {
-            error!("Failed to get additional auth headers: {}", e);
-        }
+    } else {
+        debug!("Relaying request without upstream authentication");
     }
 
     // Read the request body

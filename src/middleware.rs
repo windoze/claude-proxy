@@ -5,7 +5,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// State for API key validation middleware
 #[derive(Clone)]
@@ -13,10 +13,14 @@ pub struct ApiKeyValidatorState {
     pub expected_api_key: String,
 }
 
+/// Extension to indicate whether the client is authenticated
+#[derive(Clone, Copy, Debug)]
+pub struct ClientAuthenticated(pub bool);
+
 /// Middleware to validate client API key
 pub async fn validate_client_api_key(
     State(state): State<ApiKeyValidatorState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
     // Extract API key from request headers
@@ -37,7 +41,8 @@ pub async fn validate_client_api_key(
 
     match api_key {
         Some(key) if key == state.expected_api_key => {
-            // API key is valid, proceed with the request
+            // API key is valid, mark as authenticated and proceed
+            request.extensions_mut().insert(ClientAuthenticated(true));
             Ok(next.run(request).await)
         }
         Some(_) => {
@@ -45,8 +50,10 @@ pub async fn validate_client_api_key(
             Err(StatusCode::UNAUTHORIZED)
         }
         None => {
-            warn!("No API key provided");
-            Err(StatusCode::UNAUTHORIZED)
+            // No API key provided - relay without upstream auth
+            debug!("No API key provided, relaying without upstream authentication");
+            request.extensions_mut().insert(ClientAuthenticated(false));
+            Ok(next.run(request).await)
         }
     }
 }
