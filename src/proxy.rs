@@ -6,7 +6,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, error, info};
@@ -35,8 +35,8 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "host",
 ];
 
-/// Headers that we handle specially
-const SPECIAL_HEADERS: &[&str] = &["x-api-key", "authorization"];
+/// Authentication-related headers
+const AUTH_HEADERS: &[&str] = &["authorization", "api-key", "x-api-key"];
 
 /// Proxy handler that forwards requests to the Claude API
 pub async fn proxy_handler(
@@ -75,16 +75,6 @@ pub async fn proxy_handler(
     // Build headers for upstream request
     let mut upstream_headers = HeaderMap::new();
 
-    // Copy headers from original request, excluding hop-by-hop and special headers
-    for (name, value) in request.headers() {
-        let name_str = name.as_str().to_lowercase();
-        if !HOP_BY_HOP_HEADERS.contains(&name_str.as_str())
-            && !SPECIAL_HEADERS.contains(&name_str.as_str())
-        {
-            upstream_headers.insert(name.clone(), value.clone());
-        }
-    }
-
     // Only add upstream authentication if the client provided a valid API key
     if client_authenticated {
         // Get auth header for upstream
@@ -99,9 +89,44 @@ pub async fn proxy_handler(
             }
         };
 
-        // Add the upstream authentication header using the appropriate header name
         let auth_header_name = state.upstream_auth.auth_header_name();
-        upstream_headers.insert(HeaderName::from_static(auth_header_name), auth_header);
+        let is_api_key_auth = auth_header_name == "x-api-key";
+
+        // Copy headers from original request based on auth type
+        for (name, value) in request.headers() {
+            let name_str = name.as_str().to_lowercase();
+
+            // Skip hop-by-hop headers
+            if HOP_BY_HOP_HEADERS.contains(&name_str.as_str()) {
+                continue;
+            }
+
+            // Handle auth headers based on upstream auth type
+            if AUTH_HEADERS.contains(&name_str.as_str()) {
+                if is_api_key_auth {
+                    // For API key auth: replace auth headers with upstream API key
+                    // Authorization header uses "Bearer <key>" format
+                    // api-key and x-api-key use the raw key value
+                    if name_str == "authorization" {
+                        let bearer_value = format!("Bearer {}", auth_header.to_str().unwrap_or(""));
+                        if let Ok(hv) = HeaderValue::from_str(&bearer_value) {
+                            upstream_headers.insert(name.clone(), hv);
+                        }
+                    } else {
+                        // api-key or x-api-key: use raw key value
+                        upstream_headers.insert(name.clone(), auth_header.clone());
+                    }
+                }
+                // For bearer auth (AAD/AzCli): skip client auth headers (they'll be replaced)
+            } else {
+                upstream_headers.insert(name.clone(), value.clone());
+            }
+        }
+
+        // For bearer auth (AAD/AzCli): add the authorization header
+        if !is_api_key_auth {
+            upstream_headers.insert(HeaderName::from_static("authorization"), auth_header);
+        }
 
         // Get additional headers from auth provider
         match state.upstream_auth.get_additional_headers().await {
@@ -117,7 +142,14 @@ pub async fn proxy_handler(
             }
         }
     } else {
+        // Passthrough mode: copy all headers except hop-by-hop
         debug!("Relaying request without upstream authentication");
+        for (name, value) in request.headers() {
+            let name_str = name.as_str().to_lowercase();
+            if !HOP_BY_HOP_HEADERS.contains(&name_str.as_str()) {
+                upstream_headers.insert(name.clone(), value.clone());
+            }
+        }
     }
 
     // Read the request body

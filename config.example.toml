@@ -39,3 +39,20 @@ api_key = "${UPSTREAM_API_KEY}"
 # type = "azure_cli"
 # # Default scope for Microsoft AI Foundry
 # scope = "https://ai.azure.com/.default"
+
+# Logging configuration (optional)
+# If this section is omitted, logs are written to stdout only at INFO level
+[logging]
+# Directory for log files. If not set, logs go to stdout only.
+# log_path = "/var/log/claude-proxy"
+
+# Log rotation frequency: "hourly" or "daily" (default: "daily")
+rotation = "daily"
+
+# Log level: "trace", "debug", "info", "warn", "error" (default: "info")
+# Note: The --verbose CLI flag overrides this to "debug"
+level = "info"
+
+# Prefix for log file names (default: "claude-proxy")
+# Log files will be named like: claude-proxy.2024-01-15.log
+log_prefix = "claude-proxy"
