@@ -1,10 +1,12 @@
 # Claude Proxy
 
-A lightweight API proxy server for Claude and OpenAI APIs, written in Rust using Axum. It handles authentication translation and request forwarding between clients and upstream API providers.
+The main purpose of this proxy is to enable using Claude and OpenAI compatible clients with Microsoft AI Foundry, which may use AAD auth and most clients do not support it natively.
+
+The proxy does byte-to-byte forwarding of requests and responses, with the exception of base URL and authentication headers. So it should work with any client that supports Claude or OpenAI APIs, including streaming responses and other extended features.
 
 ## Features
 
-- Proxy requests to Claude API, OpenAI API, or Microsoft AI Foundry
+- Proxy requests to Claude API, OpenAI API, or any model that Microsoft AI Foundry supports
 - Multiple upstream authentication methods:
   - Direct API key passthrough
   - Azure AD (Entra ID) with client credentials
@@ -100,6 +102,35 @@ scope = "https://ai.azure.com/.default"
 type = "azure_cli"
 scope = "https://ai.azure.com/.default"
 ```
+
+### Configure Claude Code and OpenAI Codex
+
+In `~/.claude/settings.json`, set the API base URL to point to your proxy:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://<proxy-ip:port>/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "blah-blah-blah"
+  },
+  // ...
+}
+```
+
+In `~/.codex/config.toml`, set the OpenAI API base URL:
+
+```toml
+base_url = "http://<proxy-ip:port>/openai"
+```
+
+When using Microsoft AI Foundry, ensure your have trailing `/anthropic` or `/openai` in the base URL, the proxy simply appends the URL path to the base URL.
+When using Claude official API or OpenAI official API, the base URL can be simply `http://<proxy-ip:port>`, the trailing part should **not** be included.
+
+### Configure other API clients
+
+When using Microsoft AI Foundry, make sure to set the API base URL to include `/anthropic` or `/openai` path accordingly, Microsoft uses different endpoints for models provided by different vendors, without correct path the requests will fail.
+
+For example, an OpenAI client should set the base URL to `http://<proxy-ip:port>/openai`.
 
 ### Logging Configuration
 
