@@ -7,8 +7,8 @@ ARG BUILDPLATFORM
 # Install xx for cross-compilation support
 COPY --from=tonistiigi/xx / /
 
-# Install build dependencies
-RUN apk add --no-cache clang lld musl-dev
+# Install build dependencies (llvm provides llvm-ar needed for cross-compilation)
+RUN apk add --no-cache clang lld llvm musl-dev
 
 # Determine the Rust target based on TARGETPLATFORM
 RUN case "$TARGETPLATFORM" in \
