@@ -6,6 +6,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
+use http_body_util::BodyStream;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -33,18 +34,23 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
     "host",
-    "x-envoy-external-address",
-    "x-envoy-expected-rq-timeout-ms",
-    "x-forwarded-for",
-    "x-forwarded-proto",
-    "x-forwarded-path",
-    "x-k8se-app-name",
-    "x-k8se-app-namespace",
-    "x-k8se-app-kind",
-    "x-k8se-protocol",
-    "x-ms-containerapp-name",
-    "x-ms-containerapp-revision-name",
 ];
+
+/// Header prefixes that should not be forwarded (proxy/infrastructure headers)
+const STRIPPED_HEADER_PREFIXES: &[&str] = &["x-ms-", "x-forwarded-", "x-k8se-", "x-envoy-"];
+
+/// Check if a header should be stripped (hop-by-hop or infrastructure header)
+fn should_strip_header(name: &str) -> bool {
+    if HOP_BY_HOP_HEADERS.contains(&name) {
+        return true;
+    }
+    for prefix in STRIPPED_HEADER_PREFIXES {
+        if name.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
+}
 
 /// Authentication-related headers
 const AUTH_HEADERS: &[&str] = &["authorization", "api-key", "x-api-key"];
@@ -108,7 +114,7 @@ pub async fn proxy_handler(
             let name_str = name.as_str().to_lowercase();
 
             // Skip hop-by-hop headers
-            if HOP_BY_HOP_HEADERS.contains(&name_str.as_str()) {
+            if should_strip_header(&name_str) {
                 continue;
             }
 
@@ -157,53 +163,35 @@ pub async fn proxy_handler(
         debug!("Relaying request without upstream authentication");
         for (name, value) in request.headers() {
             let name_str = name.as_str().to_lowercase();
-            if !HOP_BY_HOP_HEADERS.contains(&name_str.as_str()) {
+            if !should_strip_header(&name_str) {
                 upstream_headers.insert(name.clone(), value.clone());
             }
         }
     }
 
-    // Read the request body
-    let body_bytes = match axum::body::to_bytes(request.into_body(), usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            error!("Failed to read request body: {}", e);
-            return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(format!("Failed to read request body: {}", e)))
-                .unwrap();
-        }
-    };
-
-    // Log request body at debug level
-    debug!("Request body size: {} bytes", body_bytes.len());
-    if !body_bytes.is_empty() {
-        if let Ok(body_str) = std::str::from_utf8(&body_bytes) {
-            // Try to parse as JSON for prettier logging
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_str) {
-                // Log a summary of the JSON request
-                if let Some(model) = json.get("model") {
-                    debug!("  model: {}", model);
-                }
-                if let Some(max_tokens) = json.get("max_tokens") {
-                    debug!("  max_tokens: {}", max_tokens);
-                }
-                if let Some(stream) = json.get("stream") {
-                    debug!("  stream: {}", stream);
-                }
-                if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
-                    debug!("  messages: {} message(s)", messages.len());
-                }
-            }
-        }
+    // Log content-length if present
+    if let Some(content_length) = upstream_headers.get("content-length") {
+        debug!(
+            "Request body size: {} bytes",
+            content_length.to_str().unwrap_or("unknown")
+        );
     }
+
+    // Stream the request body directly to upstream without buffering
+    let request_body = request.into_body();
+    let body_stream = BodyStream::new(request_body);
+    let reqwest_body = reqwest::Body::wrap_stream(body_stream.map(|result| {
+        result
+            .map(|frame| frame.into_data().unwrap_or_default())
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }));
 
     // Build and send the upstream request
     let upstream_request = state
         .http_client
         .request(method, &upstream_url)
         .headers(upstream_headers)
-        .body(body_bytes);
+        .body(reqwest_body);
 
     let upstream_response = match upstream_request.send().await {
         Ok(response) => response,
@@ -218,71 +206,46 @@ pub async fn proxy_handler(
 
     // Build response headers
     let status = upstream_response.status();
-    debug!("Upstream response status: {}", status);
+    if let Some(reason) = status.canonical_reason() {
+        info!("Upstream response: {} {}", status.as_u16(), reason);
+    } else {
+        info!("Upstream response: {}", status.as_u16());
+    }
 
     let mut response_headers = HeaderMap::new();
 
     for (name, value) in upstream_response.headers() {
         let name_str = name.as_str().to_lowercase();
-        if !HOP_BY_HOP_HEADERS.contains(&name_str.as_str()) {
+        if !should_strip_header(&name_str) {
             response_headers.insert(name.clone(), value.clone());
         }
     }
 
-    // Check if this is a streaming response
-    let is_streaming = response_headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("text/event-stream"))
-        .unwrap_or(false);
+    // Stream all response bodies without buffering
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
 
-    if is_streaming {
-        // Handle streaming response
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
-
-        let mut byte_stream = upstream_response.bytes_stream();
-        tokio::spawn(async move {
-            while let Some(chunk) = byte_stream.next().await {
-                match chunk {
-                    Ok(bytes) => {
-                        if tx.send(Ok(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+    let mut byte_stream = upstream_response.bytes_stream();
+    tokio::spawn(async move {
+        while let Some(chunk) = byte_stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if tx.send(Ok(bytes)).await.is_err() {
                         break;
                     }
                 }
+                Err(e) => {
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    break;
+                }
             }
-        });
+        }
+    });
 
-        let stream = ReceiverStream::new(rx);
-        let body = Body::from_stream(stream);
+    let stream = ReceiverStream::new(rx);
+    let body = Body::from_stream(stream);
 
-        let mut response = Response::new(body);
-        *response.status_mut() = status;
-        *response.headers_mut() = response_headers;
-        response
-    } else {
-        // Handle non-streaming response
-        let body_bytes = match upstream_response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                error!("Failed to read upstream response: {}", e);
-                return Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(format!(
-                        "Failed to read upstream response: {}",
-                        e
-                    )))
-                    .unwrap();
-            }
-        };
-
-        let mut response = Response::new(Body::from(body_bytes));
-        *response.status_mut() = status;
-        *response.headers_mut() = response_headers;
-        response
-    }
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    *response.headers_mut() = response_headers;
+    response
 }
