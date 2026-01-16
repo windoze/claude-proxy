@@ -1,27 +1,8 @@
 # Build stage
-FROM --platform=$BUILDPLATFORM rust:1.83-alpine AS builder
+FROM rust:1.83-alpine AS builder
 
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
-
-# Install xx for cross-compilation support
-COPY --from=tonistiigi/xx / /
-
-# Install build dependencies (llvm provides llvm-ar needed for cross-compilation)
-RUN apk add --no-cache clang lld llvm musl-dev
-
-# Determine the Rust target based on TARGETPLATFORM
-RUN case "$TARGETPLATFORM" in \
-      "linux/amd64") echo "x86_64-unknown-linux-musl" > /tmp/rust_target ;; \
-      "linux/arm64") echo "aarch64-unknown-linux-musl" > /tmp/rust_target ;; \
-      *) echo "Unsupported platform: $TARGETPLATFORM" && exit 1 ;; \
-    esac
-
-# Install cross-compilation dependencies if needed
-RUN xx-apk add --no-cache musl-dev gcc
-
-# Install the appropriate Rust target
-RUN rustup target add $(cat /tmp/rust_target)
+# Install build dependencies for musl
+RUN apk add --no-cache musl-dev
 
 # Create a new empty shell project
 WORKDIR /app
@@ -32,18 +13,8 @@ COPY Cargo.toml Cargo.lock ./
 # Create a dummy main.rs to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
 
-# Set up cross-compilation environment variables
-ENV CC_aarch64_unknown_linux_musl=clang \
-    AR_aarch64_unknown_linux_musl=llvm-ar \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=clang \
-    CFLAGS_aarch64_unknown_linux_musl="--target=aarch64-unknown-linux-musl -fuse-ld=lld" \
-    CC_x86_64_unknown_linux_musl=clang \
-    AR_x86_64_unknown_linux_musl=llvm-ar \
-    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=clang \
-    CFLAGS_x86_64_unknown_linux_musl="--target=x86_64-unknown-linux-musl -fuse-ld=lld"
-
 # Build dependencies only (this layer will be cached)
-RUN cargo build --release --target $(cat /tmp/rust_target) || true
+RUN cargo build --release || true
 
 # Remove the dummy source
 RUN rm -rf src
@@ -55,8 +26,8 @@ COPY src ./src
 RUN touch src/main.rs
 
 # Build the actual application
-RUN cargo build --release --target $(cat /tmp/rust_target) && \
-    cp target/$(cat /tmp/rust_target)/release/claude-proxy /app/claude-proxy
+RUN cargo build --release && \
+    cp target/release/claude-proxy /app/claude-proxy
 
 # Runtime stage
 FROM alpine:3.21
