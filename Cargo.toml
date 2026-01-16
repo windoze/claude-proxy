@@ -40,3 +40,8 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 
 [dev-dependencies]
 toml = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
