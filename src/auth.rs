@@ -418,16 +418,12 @@ impl AzureManagedIdentityAuth {
         // Add client_id parameter for user-assigned managed identity
         if let Some(ref client_id) = self.client_id {
             url.push_str(&format!("&client_id={}", urlencoding::encode(client_id)));
-            info!(
-                "Acquiring token using Container Apps user-assigned managed identity (client_id: {}) for {}={}",
-                client_id, param_name, param_value
-            );
-        } else {
-            info!(
-                "Acquiring token using Container Apps system-assigned managed identity for {}={}",
-                param_name, param_value
-            );
         }
+
+        debug!(
+            "Requesting Container Apps managed identity token from: {}",
+            url
+        );
 
         let response = self
             .http_client
@@ -496,16 +492,9 @@ impl AzureManagedIdentityAuth {
         // Add client_id parameter for user-assigned managed identity
         if let Some(ref client_id) = self.client_id {
             url.push_str(&format!("&client_id={}", urlencoding::encode(client_id)));
-            info!(
-                "Acquiring token using IMDS user-assigned managed identity (client_id: {}) for resource: {}",
-                client_id, self.resource
-            );
-        } else {
-            info!(
-                "Acquiring token using IMDS system-assigned managed identity for resource: {}",
-                self.resource
-            );
         }
+
+        debug!("Requesting IMDS managed identity token from: {}", url);
 
         let response = self
             .http_client
