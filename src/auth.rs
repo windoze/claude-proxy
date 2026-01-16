@@ -358,30 +358,81 @@ impl AzureManagedIdentityAuth {
             )
         })?;
 
+        // Try with 'resource' parameter first (documented API), fall back to 'scope' if needed
+        let result = self
+            .try_fetch_token_container_apps(identity_endpoint, &identity_header, "resource")
+            .await;
+
+        match result {
+            Ok(token) => Ok(token),
+            Err(e) => {
+                // If 'resource' failed with invalid_scope error, try with 'scope' parameter
+                let error_msg = format!("{}", e);
+                if error_msg.contains("invalid_scope") || error_msg.contains("scope") {
+                    debug!(
+                        "Token request with 'resource' parameter failed, retrying with 'scope': {}",
+                        e
+                    );
+                    self.try_fetch_token_container_apps(
+                        identity_endpoint,
+                        &identity_header,
+                        "scope",
+                    )
+                    .await
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Helper to fetch token with either 'resource' or 'scope' parameter
+    async fn try_fetch_token_container_apps(
+        &self,
+        identity_endpoint: &str,
+        identity_header: &str,
+        param_name: &str,
+    ) -> Result<CachedToken, AuthError> {
+        // Convert resource to scope format if using 'scope' parameter
+        let param_value = if param_name == "scope" {
+            if self.resource.ends_with("/.default") {
+                self.resource.clone()
+            } else {
+                format!("{}/.default", self.resource.trim_end_matches('/'))
+            }
+        } else {
+            // For 'resource' parameter, strip /.default suffix if present
+            self.resource
+                .strip_suffix("/.default")
+                .unwrap_or(&self.resource)
+                .to_string()
+        };
+
         let mut url = format!(
-            "{}?api-version=2019-08-01&resource={}",
+            "{}?api-version=2019-08-01&{}={}",
             identity_endpoint,
-            urlencoding::encode(&self.resource)
+            param_name,
+            urlencoding::encode(&param_value)
         );
 
         // Add client_id parameter for user-assigned managed identity
         if let Some(ref client_id) = self.client_id {
             url.push_str(&format!("&client_id={}", urlencoding::encode(client_id)));
             info!(
-                "Acquiring token using Container Apps user-assigned managed identity (client_id: {}) for resource: {}",
-                client_id, self.resource
+                "Acquiring token using Container Apps user-assigned managed identity (client_id: {}) for {}={}",
+                client_id, param_name, param_value
             );
         } else {
             info!(
-                "Acquiring token using Container Apps system-assigned managed identity for resource: {}",
-                self.resource
+                "Acquiring token using Container Apps system-assigned managed identity for {}={}",
+                param_name, param_value
             );
         }
 
         let response = self
             .http_client
             .get(&url)
-            .header("X-IDENTITY-HEADER", &identity_header)
+            .header("X-IDENTITY-HEADER", identity_header)
             .send()
             .await
             .map_err(|e| {
