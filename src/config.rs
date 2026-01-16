@@ -86,6 +86,10 @@ pub struct ProxyConfig {
     /// Logging configuration (optional)
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// TLS configuration (optional, defaults to disabled)
+    #[serde(default)]
+    pub tls: TlsConfig,
 }
 
 /// Log rotation frequency
@@ -195,6 +199,78 @@ fn default_upstream_url() -> String {
 
 fn default_azure_scope() -> String {
     "https://ai.azure.com/.default".to_string()
+}
+
+fn default_https_port() -> u16 {
+    443
+}
+
+fn default_http_challenge_port() -> u16 {
+    80
+}
+
+fn default_acme_directory() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+fn default_acme_cache_dir() -> String {
+    dirs::data_local_dir()
+        .map(|p| p.join("claude-proxy").join("acme"))
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "/var/lib/claude-proxy/acme".to_string())
+}
+
+/// TLS configuration
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum TlsConfig {
+    /// TLS disabled (default)
+    #[default]
+    Disabled,
+
+    /// Manual TLS with certificate/key files
+    Manual {
+        /// Path to PEM-encoded certificate file
+        #[serde(deserialize_with = "deserialize_env_string")]
+        cert_path: String,
+
+        /// Path to PEM-encoded private key file
+        #[serde(deserialize_with = "deserialize_env_string")]
+        key_path: String,
+
+        /// HTTPS listen port (default: 443)
+        #[serde(default = "default_https_port")]
+        https_port: u16,
+    },
+
+    /// Automatic certificate provisioning via ACME (Let's Encrypt)
+    Acme {
+        /// Contact email for ACME account
+        #[serde(deserialize_with = "deserialize_env_string")]
+        email: String,
+
+        /// Domain names to provision certificates for
+        domains: Vec<String>,
+
+        /// ACME directory URL (default: Let's Encrypt production)
+        #[serde(default = "default_acme_directory")]
+        directory_url: String,
+
+        /// Directory to cache ACME account and certificates
+        #[serde(
+            default = "default_acme_cache_dir",
+            deserialize_with = "deserialize_env_string"
+        )]
+        cache_dir: String,
+
+        /// HTTPS listen port (default: 443)
+        #[serde(default = "default_https_port")]
+        https_port: u16,
+
+        /// HTTP port for ACME HTTP-01 challenges (default: 80)
+        #[serde(default = "default_http_challenge_port")]
+        http_challenge_port: u16,
+    },
 }
 
 impl ProxyConfig {
@@ -433,5 +509,144 @@ mod tests {
         assert_eq!(config.bind_address, "0.0.0.0");
         assert_eq!(config.port, 8080);
         assert_eq!(config.upstream_url, "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn test_tls_disabled_by_default() {
+        let toml_str = r#"
+            client_api_key = "proxy-key"
+            [upstream_auth]
+            type = "api_key"
+            api_key = "test-key"
+        "#;
+
+        let config: ProxyConfig = toml::from_str(toml_str).unwrap();
+        assert!(matches!(config.tls, TlsConfig::Disabled));
+    }
+
+    #[test]
+    fn test_tls_manual_mode() {
+        let toml_str = r#"
+            client_api_key = "proxy-key"
+            [upstream_auth]
+            type = "api_key"
+            api_key = "test-key"
+
+            [tls]
+            mode = "manual"
+            cert_path = "/etc/ssl/cert.pem"
+            key_path = "/etc/ssl/key.pem"
+        "#;
+
+        let config: ProxyConfig = toml::from_str(toml_str).unwrap();
+        match config.tls {
+            TlsConfig::Manual {
+                cert_path,
+                key_path,
+                https_port,
+            } => {
+                assert_eq!(cert_path, "/etc/ssl/cert.pem");
+                assert_eq!(key_path, "/etc/ssl/key.pem");
+                assert_eq!(https_port, 443);
+            }
+            _ => panic!("Expected Manual TLS config"),
+        }
+    }
+
+    #[test]
+    fn test_tls_manual_mode_custom_port() {
+        let toml_str = r#"
+            client_api_key = "proxy-key"
+            [upstream_auth]
+            type = "api_key"
+            api_key = "test-key"
+
+            [tls]
+            mode = "manual"
+            cert_path = "/etc/ssl/cert.pem"
+            key_path = "/etc/ssl/key.pem"
+            https_port = 8443
+        "#;
+
+        let config: ProxyConfig = toml::from_str(toml_str).unwrap();
+        match config.tls {
+            TlsConfig::Manual { https_port, .. } => {
+                assert_eq!(https_port, 8443);
+            }
+            _ => panic!("Expected Manual TLS config"),
+        }
+    }
+
+    #[test]
+    fn test_tls_acme_mode() {
+        let toml_str = r#"
+            client_api_key = "proxy-key"
+            [upstream_auth]
+            type = "api_key"
+            api_key = "test-key"
+
+            [tls]
+            mode = "acme"
+            email = "admin@example.com"
+            domains = ["example.com", "www.example.com"]
+        "#;
+
+        let config: ProxyConfig = toml::from_str(toml_str).unwrap();
+        match config.tls {
+            TlsConfig::Acme {
+                email,
+                domains,
+                directory_url,
+                https_port,
+                http_challenge_port,
+                ..
+            } => {
+                assert_eq!(email, "admin@example.com");
+                assert_eq!(domains, vec!["example.com", "www.example.com"]);
+                assert_eq!(
+                    directory_url,
+                    "https://acme-v02.api.letsencrypt.org/directory"
+                );
+                assert_eq!(https_port, 443);
+                assert_eq!(http_challenge_port, 80);
+            }
+            _ => panic!("Expected ACME TLS config"),
+        }
+    }
+
+    #[test]
+    fn test_tls_acme_mode_staging() {
+        let toml_str = r#"
+            client_api_key = "proxy-key"
+            [upstream_auth]
+            type = "api_key"
+            api_key = "test-key"
+
+            [tls]
+            mode = "acme"
+            email = "admin@example.com"
+            domains = ["example.com"]
+            directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory"
+            https_port = 8443
+            http_challenge_port = 8080
+        "#;
+
+        let config: ProxyConfig = toml::from_str(toml_str).unwrap();
+        match config.tls {
+            TlsConfig::Acme {
+                directory_url,
+                https_port,
+                http_challenge_port,
+                ..
+            } => {
+                assert_eq!(
+                    directory_url,
+                    "https://acme-staging-v02.api.letsencrypt.org/directory"
+                );
+                assert_eq!(https_port, 8443);
+                assert_eq!(http_challenge_port, 8080);
+            }
+            _ => panic!("Expected ACME TLS config"),
+        }
     }
 }

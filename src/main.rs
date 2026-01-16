@@ -1,7 +1,9 @@
+mod acme;
 mod auth;
 mod config;
 mod middleware;
 mod proxy;
+mod tls;
 
 use axum::{middleware as axum_middleware, routing::any, Router};
 use clap::Parser;
@@ -12,7 +14,9 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 use crate::auth::create_upstream_auth;
-use crate::config::{LogLevel, LogRotation, LoggingConfig, ProxyConfig, UpstreamAuthConfig};
+use crate::config::{
+    LogLevel, LogRotation, LoggingConfig, ProxyConfig, TlsConfig, UpstreamAuthConfig,
+};
 use crate::middleware::{validate_client_api_key, ApiKeyValidatorState};
 use crate::proxy::{proxy_handler, ProxyState};
 
@@ -86,6 +90,43 @@ struct Args {
     /// Prefix for log file names
     #[arg(long, value_name = "PREFIX")]
     log_prefix: Option<String>,
+
+    // TLS settings
+    /// TLS mode: disabled, manual, or acme
+    #[arg(long, value_name = "MODE")]
+    tls_mode: Option<String>,
+
+    /// Path to TLS certificate file (manual mode)
+    #[arg(long, value_name = "PATH")]
+    tls_cert_path: Option<String>,
+
+    /// Path to TLS private key file (manual mode)
+    #[arg(long, value_name = "PATH")]
+    tls_key_path: Option<String>,
+
+    /// HTTPS listen port (default: 443)
+    #[arg(long, value_name = "PORT")]
+    https_port: Option<u16>,
+
+    /// ACME contact email
+    #[arg(long, value_name = "EMAIL")]
+    acme_email: Option<String>,
+
+    /// ACME domains (comma-separated)
+    #[arg(long, value_name = "DOMAINS")]
+    acme_domains: Option<String>,
+
+    /// ACME directory URL (default: Let's Encrypt production)
+    #[arg(long, value_name = "URL")]
+    acme_directory_url: Option<String>,
+
+    /// ACME cache directory for certificates and account
+    #[arg(long, value_name = "PATH")]
+    acme_cache_dir: Option<String>,
+
+    /// HTTP port for ACME HTTP-01 challenges (default: 80)
+    #[arg(long, value_name = "PORT")]
+    http_challenge_port: Option<u16>,
 }
 
 #[tokio::main]
@@ -114,14 +155,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = init_logging(log_level, &config)?;
 
     info!("Starting Claude API Proxy");
-    info!("Listening on {}:{}", config.bind_address, config.port);
     info!("Upstream URL: {}", config.upstream_url);
 
+    // Build the main proxy router
+    let app = build_proxy_router(&config);
+
+    // Start server(s) based on TLS configuration
+    match &config.tls {
+        TlsConfig::Disabled => {
+            info!(
+                "TLS disabled, starting HTTP server on {}:{}",
+                config.bind_address, config.port
+            );
+            start_http_server(app, &config).await?;
+        }
+        TlsConfig::Manual {
+            cert_path,
+            key_path,
+            https_port,
+        } => {
+            info!(
+                "TLS enabled (manual mode), starting HTTPS server on {}:{}",
+                config.bind_address, https_port
+            );
+            start_https_server_manual(app, &config, cert_path, key_path, *https_port).await?;
+        }
+        TlsConfig::Acme {
+            email,
+            domains,
+            directory_url,
+            cache_dir,
+            https_port,
+            http_challenge_port,
+        } => {
+            info!("TLS enabled (ACME mode) for domains: {:?}", domains);
+            info!(
+                "HTTPS server on {}:{}, HTTP challenge server on {}:{}",
+                config.bind_address, https_port, config.bind_address, http_challenge_port
+            );
+            start_https_server_acme(
+                app,
+                &config,
+                email,
+                domains,
+                directory_url,
+                cache_dir,
+                *https_port,
+                *http_challenge_port,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Build the main proxy router
+fn build_proxy_router(config: &ProxyConfig) -> Router {
     // Create upstream auth provider
     let upstream_auth = create_upstream_auth(&config.upstream_auth);
 
     // Create HTTP client for upstream requests
-    let http_client = reqwest::Client::builder().build()?;
+    let http_client = reqwest::Client::builder()
+        .build()
+        .expect("Failed to create HTTP client");
 
     // Create proxy state
     let proxy_state = ProxyState {
@@ -136,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build the router
-    let app = Router::new()
+    Router::new()
         .route("/{*path}", any(proxy_handler))
         .route("/", any(proxy_handler))
         .layer(axum_middleware::from_fn_with_state(
@@ -144,16 +241,123 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             validate_client_api_key,
         ))
         .layer(TraceLayer::new_for_http())
-        .with_state(proxy_state);
+        .with_state(proxy_state)
+}
 
-    // Start the server
+/// Start plain HTTP server (existing behavior when TLS is disabled)
+async fn start_http_server(
+    app: Router,
+    config: &ProxyConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = format!("{}:{}", config.bind_address, config.port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
-    info!("Claude API Proxy is ready to accept connections");
-
+    info!(
+        "Claude API Proxy is ready to accept connections on http://{}",
+        addr
+    );
     axum::serve(listener, app).await?;
 
+    Ok(())
+}
+
+/// Start HTTPS server with manual certificate files
+async fn start_https_server_manual(
+    app: Router,
+    config: &ProxyConfig,
+    cert_path: &str,
+    key_path: &str,
+    https_port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rustls_config = tls::setup_manual_tls(cert_path, key_path).await?;
+    let addr: SocketAddr = format!("{}:{}", config.bind_address, https_port).parse()?;
+
+    info!(
+        "Claude API Proxy is ready to accept connections on https://{}",
+        addr
+    );
+
+    axum_server::bind_rustls(addr, rustls_config)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
+}
+
+/// Start HTTPS server with ACME certificate provisioning
+/// Also starts a separate HTTP server for ACME HTTP-01 challenges
+#[allow(clippy::too_many_arguments)]
+async fn start_https_server_acme(
+    app: Router,
+    config: &ProxyConfig,
+    email: &str,
+    domains: &[String],
+    directory_url: &str,
+    cache_dir: &str,
+    https_port: u16,
+    http_challenge_port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    // Create ACME manager
+    let manager =
+        Arc::new(acme::AcmeManager::new(email, domains.to_vec(), directory_url, cache_dir).await?);
+
+    let rustls_config = manager.rustls_config();
+    let challenge_state = manager.challenge_state();
+
+    // Start certificate renewal background task
+    let _renewal_handle = manager.clone().start_renewal_loop();
+
+    // Build HTTP-01 challenge server
+    let challenge_app = acme::build_challenge_router(challenge_state);
+    let challenge_addr: SocketAddr =
+        format!("{}:{}", config.bind_address, http_challenge_port).parse()?;
+
+    // Build HTTPS server address
+    let https_addr: SocketAddr = format!("{}:{}", config.bind_address, https_port).parse()?;
+
+    info!(
+        "Starting ACME HTTP-01 challenge server on http://{}",
+        challenge_addr
+    );
+    info!(
+        "Claude API Proxy is ready to accept connections on https://{}",
+        https_addr
+    );
+
+    // Run both servers concurrently
+    tokio::select! {
+        result = start_challenge_server(challenge_app, challenge_addr) => {
+            result?;
+        }
+        result = start_tls_server(app, https_addr, rustls_config) => {
+            result?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Start the HTTP-01 challenge server
+async fn start_challenge_server(
+    app: Router,
+    addr: SocketAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Start the TLS server
+async fn start_tls_server(
+    app: Router,
+    addr: SocketAddr,
+    config: axum_server::tls_rustls::RustlsConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    axum_server::bind_rustls(addr, config)
+        .serve(app.into_make_service())
+        .await?;
     Ok(())
 }
 
@@ -391,6 +595,10 @@ fn build_config(
         "client_api_key is required. Set via --client-api-key, CLAUDE_PROXY__CLIENT_API_KEY, or config file."
     )?;
 
+    // Build TLS config
+    let file_tls = file_config.as_ref().map(|fc| fc.tls.clone());
+    let tls = build_tls_config(args, file_tls)?;
+
     Ok(ProxyConfig {
         bind_address,
         port,
@@ -398,6 +606,7 @@ fn build_config(
         client_api_key,
         upstream_auth,
         logging,
+        tls,
     })
 }
 
@@ -607,5 +816,162 @@ fn parse_log_level(s: &str) -> Option<LogLevel> {
         "warn" => Some(LogLevel::Warn),
         "error" => Some(LogLevel::Error),
         _ => None,
+    }
+}
+
+/// Build TLS config from CLI args, env vars, and file config
+fn build_tls_config(
+    args: &Args,
+    file_tls: Option<TlsConfig>,
+) -> Result<TlsConfig, Box<dyn std::error::Error>> {
+    // Determine TLS mode: CLI > env > file > default (disabled)
+    let tls_mode = args
+        .tls_mode
+        .clone()
+        .or_else(|| std::env::var("CLAUDE_PROXY__TLS__MODE").ok())
+        .or_else(|| file_tls.as_ref().map(|t| tls_mode_name(t).to_string()))
+        .unwrap_or_else(|| "disabled".to_string());
+
+    match tls_mode.to_lowercase().as_str() {
+        "disabled" => Ok(TlsConfig::Disabled),
+        "manual" => {
+            let cert_path = get_optional_value(
+                args.tls_cert_path.clone(),
+                "CLAUDE_PROXY__TLS__CERT_PATH",
+                match &file_tls {
+                    Some(TlsConfig::Manual { cert_path, .. }) => Some(cert_path.clone()),
+                    _ => None,
+                },
+            )
+            .ok_or("tls.cert_path is required for manual TLS mode. Set via --tls-cert-path, CLAUDE_PROXY__TLS__CERT_PATH, or config file.")?;
+
+            let key_path = get_optional_value(
+                args.tls_key_path.clone(),
+                "CLAUDE_PROXY__TLS__KEY_PATH",
+                match &file_tls {
+                    Some(TlsConfig::Manual { key_path, .. }) => Some(key_path.clone()),
+                    _ => None,
+                },
+            )
+            .ok_or("tls.key_path is required for manual TLS mode. Set via --tls-key-path, CLAUDE_PROXY__TLS__KEY_PATH, or config file.")?;
+
+            let https_port = get_value(
+                args.https_port,
+                "CLAUDE_PROXY__TLS__HTTPS_PORT",
+                match &file_tls {
+                    Some(TlsConfig::Manual { https_port, .. }) => Some(*https_port),
+                    _ => None,
+                },
+                443,
+            );
+
+            Ok(TlsConfig::Manual {
+                cert_path,
+                key_path,
+                https_port,
+            })
+        }
+        "acme" => {
+            let email = get_optional_value(
+                args.acme_email.clone(),
+                "CLAUDE_PROXY__TLS__EMAIL",
+                match &file_tls {
+                    Some(TlsConfig::Acme { email, .. }) => Some(email.clone()),
+                    _ => None,
+                },
+            )
+            .ok_or("tls.email is required for ACME mode. Set via --acme-email, CLAUDE_PROXY__TLS__EMAIL, or config file.")?;
+
+            // Parse domains from CLI (comma-separated) or use file/env
+            let domains = if let Some(domains_str) = args.acme_domains.clone() {
+                domains_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            } else if let Ok(domains_str) = std::env::var("CLAUDE_PROXY__TLS__DOMAINS") {
+                domains_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect()
+            } else {
+                match &file_tls {
+                    Some(TlsConfig::Acme { domains, .. }) => domains.clone(),
+                    _ => Vec::new(),
+                }
+            };
+
+            if domains.is_empty() {
+                return Err("tls.domains is required for ACME mode. Set via --acme-domains, CLAUDE_PROXY__TLS__DOMAINS, or config file.".into());
+            }
+
+            let directory_url = get_value(
+                args.acme_directory_url.clone(),
+                "CLAUDE_PROXY__TLS__DIRECTORY_URL",
+                match &file_tls {
+                    Some(TlsConfig::Acme { directory_url, .. }) => Some(directory_url.clone()),
+                    _ => None,
+                },
+                "https://acme-v02.api.letsencrypt.org/directory".to_string(),
+            );
+
+            let cache_dir = get_value(
+                args.acme_cache_dir.clone(),
+                "CLAUDE_PROXY__TLS__CACHE_DIR",
+                match &file_tls {
+                    Some(TlsConfig::Acme { cache_dir, .. }) => Some(cache_dir.clone()),
+                    _ => None,
+                },
+                dirs::data_local_dir()
+                    .map(|p| p.join("claude-proxy").join("acme"))
+                    .and_then(|p| p.to_str().map(String::from))
+                    .unwrap_or_else(|| "/var/lib/claude-proxy/acme".to_string()),
+            );
+
+            let https_port = get_value(
+                args.https_port,
+                "CLAUDE_PROXY__TLS__HTTPS_PORT",
+                match &file_tls {
+                    Some(TlsConfig::Acme { https_port, .. }) => Some(*https_port),
+                    _ => None,
+                },
+                443,
+            );
+
+            let http_challenge_port = get_value(
+                args.http_challenge_port,
+                "CLAUDE_PROXY__TLS__HTTP_CHALLENGE_PORT",
+                match &file_tls {
+                    Some(TlsConfig::Acme {
+                        http_challenge_port,
+                        ..
+                    }) => Some(*http_challenge_port),
+                    _ => None,
+                },
+                80,
+            );
+
+            Ok(TlsConfig::Acme {
+                email,
+                domains,
+                directory_url,
+                cache_dir,
+                https_port,
+                http_challenge_port,
+            })
+        }
+        _ => Err(format!(
+            "Unknown TLS mode: '{}'. Valid modes: disabled, manual, acme",
+            tls_mode
+        )
+        .into()),
+    }
+}
+
+/// Get the mode name for a TlsConfig variant
+fn tls_mode_name(tls: &TlsConfig) -> &'static str {
+    match tls {
+        TlsConfig::Disabled => "disabled",
+        TlsConfig::Manual { .. } => "manual",
+        TlsConfig::Acme { .. } => "acme",
     }
 }

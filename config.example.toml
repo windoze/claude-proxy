@@ -76,3 +76,38 @@ level = "info"
 # Prefix for log file names (default: "claude-proxy")
 # Log files will be named like: claude-proxy.2024-01-15.log
 log_prefix = "claude-proxy"
+
+# TLS Configuration (optional)
+# If this section is omitted, the proxy runs in HTTP-only mode
+# Choose ONE of the following TLS options:
+
+# Option 1: TLS Disabled (default)
+# No [tls] section needed, or explicitly:
+# [tls]
+# mode = "disabled"
+
+# Option 2: Manual TLS with your own certificate files
+# Use this when you have pre-provisioned certificates (e.g., from your CA)
+# [tls]
+# mode = "manual"
+# cert_path = "/etc/ssl/certs/proxy.pem"
+# key_path = "/etc/ssl/private/proxy.key"
+# https_port = 443  # Default: 443
+
+# Option 3: Automatic TLS via ACME (Let's Encrypt)
+# Automatically provisions and renews certificates from Let's Encrypt
+# Requirements:
+# - Port 80 must be accessible from the internet for HTTP-01 challenges
+# - DNS must point to this server for all configured domains
+# [tls]
+# mode = "acme"
+# email = "admin@example.com"
+# domains = ["proxy.example.com", "api.example.com"]
+# # Use staging for testing (avoids rate limits):
+# # directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory"
+# # Default: Let's Encrypt production
+# directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+# # Directory to store ACME account and certificates
+# cache_dir = "/var/lib/claude-proxy/acme"
+# https_port = 443           # Default: 443
+# http_challenge_port = 80   # Default: 80 (for HTTP-01 domain validation)
