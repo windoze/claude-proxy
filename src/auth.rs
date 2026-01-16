@@ -328,6 +328,10 @@ struct AzureImdsTokenResponse {
 
 impl AzureManagedIdentityAuth {
     pub fn new(client_id: Option<String>, resource: String) -> Self {
+        info!(
+            "Initializing Azure Managed Identity auth with resource: {:?}, client_id: {:?}",
+            resource, client_id
+        );
         Self {
             client_id,
             resource,
