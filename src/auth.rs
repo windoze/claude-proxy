@@ -310,9 +310,19 @@ impl UpstreamAuth for AzureCliAuth {
     }
 }
 
+/// Response from Azure Container Apps identity endpoint
 #[derive(serde::Deserialize)]
-struct AzureManagedIdentityTokenResponse {
+struct AzureContainerAppsTokenResponse {
     access_token: String,
+    /// Expires on as Unix timestamp string
+    expires_on: String,
+}
+
+/// Response from Azure IMDS endpoint
+#[derive(serde::Deserialize)]
+struct AzureImdsTokenResponse {
+    access_token: String,
+    /// Expires in seconds as string
     expires_in: String,
 }
 
@@ -327,7 +337,106 @@ impl AzureManagedIdentityAuth {
     }
 
     async fn fetch_token(&self) -> Result<CachedToken, AuthError> {
-        // Azure IMDS endpoint for managed identity tokens
+        // Try Azure Container Apps endpoint first (via IDENTITY_ENDPOINT env var)
+        // Falls back to Azure IMDS endpoint for VMs/AKS/etc.
+        if let Ok(identity_endpoint) = std::env::var("IDENTITY_ENDPOINT") {
+            self.fetch_token_container_apps(&identity_endpoint).await
+        } else {
+            self.fetch_token_imds().await
+        }
+    }
+
+    /// Fetch token using Azure Container Apps identity endpoint
+    /// See: https://learn.microsoft.com/en-us/azure/container-apps/managed-identity?tabs=portal%2Chttp
+    async fn fetch_token_container_apps(
+        &self,
+        identity_endpoint: &str,
+    ) -> Result<CachedToken, AuthError> {
+        let identity_header = std::env::var("IDENTITY_HEADER").map_err(|_| {
+            AuthError::TokenAcquisition(
+                "IDENTITY_ENDPOINT is set but IDENTITY_HEADER is missing".to_string(),
+            )
+        })?;
+
+        let mut url = format!(
+            "{}?api-version=2019-08-01&resource={}",
+            identity_endpoint,
+            urlencoding::encode(&self.resource)
+        );
+
+        // Add client_id parameter for user-assigned managed identity
+        if let Some(ref client_id) = self.client_id {
+            url.push_str(&format!("&client_id={}", urlencoding::encode(client_id)));
+            info!(
+                "Acquiring token using Container Apps user-assigned managed identity (client_id: {}) for resource: {}",
+                client_id, self.resource
+            );
+        } else {
+            info!(
+                "Acquiring token using Container Apps system-assigned managed identity for resource: {}",
+                self.resource
+            );
+        }
+
+        let response = self
+            .http_client
+            .get(&url)
+            .header("X-IDENTITY-HEADER", &identity_header)
+            .send()
+            .await
+            .map_err(|e| {
+                AuthError::TokenAcquisition(format!(
+                    "Failed to contact Azure Container Apps identity endpoint: {}",
+                    e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            error!(
+                "Azure Container Apps managed identity token request failed with status {}: {}",
+                status, error_text
+            );
+            return Err(AuthError::TokenAcquisition(format!(
+                "Azure Container Apps managed identity token request failed ({}): {}",
+                status, error_text
+            )));
+        }
+
+        let token_response: AzureContainerAppsTokenResponse =
+            response.json().await.map_err(|e| {
+                AuthError::TokenAcquisition(format!(
+                    "Failed to parse Azure Container Apps token response: {}",
+                    e
+                ))
+            })?;
+
+        // expires_on is returned as a Unix timestamp string
+        let expires_on_secs: i64 = token_response
+            .expires_on
+            .parse()
+            .unwrap_or_else(|_| (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp());
+
+        // Subtract 60 seconds buffer to ensure we refresh before expiry
+        let expires_at = chrono::DateTime::from_timestamp(expires_on_secs, 0)
+            .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1))
+            - chrono::Duration::seconds(60);
+
+        debug!(
+            "Acquired Container Apps managed identity token expiring at {}",
+            expires_at
+        );
+
+        Ok(CachedToken {
+            access_token: token_response.access_token,
+            expires_at,
+        })
+    }
+
+    /// Fetch token using Azure Instance Metadata Service (IMDS)
+    /// Used for VMs, AKS, and other Azure compute resources
+    async fn fetch_token_imds(&self) -> Result<CachedToken, AuthError> {
         let mut url = format!(
             "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource={}",
             urlencoding::encode(&self.resource)
@@ -337,12 +446,12 @@ impl AzureManagedIdentityAuth {
         if let Some(ref client_id) = self.client_id {
             url.push_str(&format!("&client_id={}", urlencoding::encode(client_id)));
             info!(
-                "Acquiring token using user-assigned managed identity (client_id: {}) for resource: {}",
+                "Acquiring token using IMDS user-assigned managed identity (client_id: {}) for resource: {}",
                 client_id, self.resource
             );
         } else {
             info!(
-                "Acquiring token using system-assigned managed identity for resource: {}",
+                "Acquiring token using IMDS system-assigned managed identity for resource: {}",
                 self.resource
             );
         }
@@ -364,22 +473,18 @@ impl AzureManagedIdentityAuth {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
             error!(
-                "Azure managed identity token request failed with status {}: {}",
+                "Azure IMDS managed identity token request failed with status {}: {}",
                 status, error_text
             );
             return Err(AuthError::TokenAcquisition(format!(
-                "Azure managed identity token request failed ({}): {}",
+                "Azure IMDS managed identity token request failed ({}): {}",
                 status, error_text
             )));
         }
 
-        let token_response: AzureManagedIdentityTokenResponse =
-            response.json().await.map_err(|e| {
-                AuthError::TokenAcquisition(format!(
-                    "Failed to parse Azure managed identity token response: {}",
-                    e
-                ))
-            })?;
+        let token_response: AzureImdsTokenResponse = response.json().await.map_err(|e| {
+            AuthError::TokenAcquisition(format!("Failed to parse Azure IMDS token response: {}", e))
+        })?;
 
         // expires_in is returned as a string representing seconds
         let expires_in_secs: i64 = token_response.expires_in.parse().unwrap_or(3600);
@@ -387,7 +492,10 @@ impl AzureManagedIdentityAuth {
         // Subtract 60 seconds buffer to ensure we refresh before expiry
         let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in_secs - 60);
 
-        debug!("Acquired managed identity token expiring at {}", expires_at);
+        debug!(
+            "Acquired IMDS managed identity token expiring at {}",
+            expires_at
+        );
 
         Ok(CachedToken {
             access_token: token_response.access_token,
