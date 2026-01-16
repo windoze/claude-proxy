@@ -4,8 +4,11 @@ FROM --platform=$BUILDPLATFORM rust:1.83-alpine AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 
-# Install build dependencies for musl
-RUN apk add --no-cache musl-dev
+# Install xx for cross-compilation support
+COPY --from=tonistiigi/xx / /
+
+# Install build dependencies
+RUN apk add --no-cache clang lld musl-dev
 
 # Determine the Rust target based on TARGETPLATFORM
 RUN case "$TARGETPLATFORM" in \
@@ -13,6 +16,9 @@ RUN case "$TARGETPLATFORM" in \
       "linux/arm64") echo "aarch64-unknown-linux-musl" > /tmp/rust_target ;; \
       *) echo "Unsupported platform: $TARGETPLATFORM" && exit 1 ;; \
     esac
+
+# Install cross-compilation dependencies if needed
+RUN xx-apk add --no-cache musl-dev gcc
 
 # Install the appropriate Rust target
 RUN rustup target add $(cat /tmp/rust_target)
@@ -25,6 +31,16 @@ COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy main.rs to build dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
+
+# Set up cross-compilation environment variables
+ENV CC_aarch64_unknown_linux_musl=clang \
+    AR_aarch64_unknown_linux_musl=llvm-ar \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=clang \
+    CFLAGS_aarch64_unknown_linux_musl="--target=aarch64-unknown-linux-musl -fuse-ld=lld" \
+    CC_x86_64_unknown_linux_musl=clang \
+    AR_x86_64_unknown_linux_musl=llvm-ar \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=clang \
+    CFLAGS_x86_64_unknown_linux_musl="--target=x86_64-unknown-linux-musl -fuse-ld=lld"
 
 # Build dependencies only (this layer will be cached)
 RUN cargo build --release --target $(cat /tmp/rust_target) || true
