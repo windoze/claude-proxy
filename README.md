@@ -11,6 +11,7 @@ The proxy does byte-to-byte forwarding of requests and responses, with the excep
   - Direct API key passthrough
   - Azure AD (Entra ID) with client credentials
   - Azure CLI credentials for local development
+  - Azure Managed Identity for Azure-hosted workloads
 - Client API key validation with passthrough mode for unauthenticated requests
 - Streaming (SSE) response support
 - Configurable logging with file rotation
@@ -30,7 +31,7 @@ cargo build --release
 
 ## Configuration
 
-A configuration file is required. The proxy searches for config files in this order:
+Configuration can be provided via a TOML file, CLI flags, or environment variables (or a combination). The proxy searches for config files in this order:
 
 1. Path specified via `--config` CLI flag
 2. `CLAUDE_PROXY_CONFIG_FILE` environment variable
@@ -103,6 +104,15 @@ type = "azure_cli"
 scope = "https://ai.azure.com/.default"
 ```
 
+**Option 4: Azure Managed Identity** (Microsoft AI Foundry only)
+```toml
+[upstream_auth]
+type = "azure_managed_identity"
+# Optional: client_id for user-assigned managed identity
+# client_id = "your-user-assigned-identity-client-id"
+resource = "https://ai.azure.com/.default"
+```
+
 ### Configure Claude Code and OpenAI Codex
 
 In `~/.claude/settings.json`, set the API base URL to point to your proxy:
@@ -140,6 +150,65 @@ log_path = "/var/log/claude-proxy"  # Optional: omit for stdout only
 rotation = "daily"                   # "hourly" or "daily"
 level = "info"                       # trace, debug, info, warn, error
 log_prefix = "claude-proxy"
+```
+
+### Command Line Options
+
+All configuration can also be specified via CLI flags or environment variables. The precedence order is: CLI > Environment Variable > Config File > Default.
+
+#### General Options
+
+| CLI Flag | Environment Variable | Description | Default |
+|----------|---------------------|-------------|---------|
+| `-c, --config <FILE>` | `CLAUDE_PROXY_CONFIG_FILE` | Path to configuration file | (see config file discovery) |
+| `-v, --verbose` | - | Enable verbose (debug) logging | `false` |
+
+#### Server Options
+
+| CLI Flag | Environment Variable | Description | Default |
+|----------|---------------------|-------------|---------|
+| `--bind-address <ADDRESS>` | `CLAUDE_PROXY__BIND_ADDRESS` | Address to bind the server to | `0.0.0.0` |
+| `-p, --port <PORT>` | `CLAUDE_PROXY__PORT` | Port to listen on | `8080` |
+| `--upstream-url <URL>` | `CLAUDE_PROXY__UPSTREAM_URL` | Upstream API URL | (required) |
+| `--client-api-key <KEY>` | `CLAUDE_PROXY__CLIENT_API_KEY` | API key clients must provide | (required) |
+
+#### Upstream Authentication Options
+
+| CLI Flag | Environment Variable | Description |
+|----------|---------------------|-------------|
+| `--upstream-auth-type <TYPE>` | `CLAUDE_PROXY__UPSTREAM_AUTH__TYPE` | Auth type: `api_key`, `azure_ad`, `azure_cli`, `azure_managed_identity` |
+| `--upstream-api-key <KEY>` | `CLAUDE_PROXY__UPSTREAM_AUTH__API_KEY` | API key (when type=`api_key`) |
+| `--azure-tenant-id <ID>` | `CLAUDE_PROXY__UPSTREAM_AUTH__TENANT_ID` | Azure AD tenant ID (when type=`azure_ad`) |
+| `--azure-client-id <ID>` | `CLAUDE_PROXY__UPSTREAM_AUTH__CLIENT_ID` | Azure AD/managed identity client ID |
+| `--azure-client-secret <SECRET>` | `CLAUDE_PROXY__UPSTREAM_AUTH__CLIENT_SECRET` | Azure AD client secret (when type=`azure_ad`) |
+| `--azure-scope <SCOPE>` | `CLAUDE_PROXY__UPSTREAM_AUTH__SCOPE` | Azure scope (default: `https://ai.azure.com/.default`) |
+| - | `CLAUDE_PROXY__UPSTREAM_AUTH__RESOURCE` | Azure managed identity resource (when type=`azure_managed_identity`) |
+
+#### Logging Options
+
+| CLI Flag | Environment Variable | Description | Default |
+|----------|---------------------|-------------|---------|
+| `--log-path <PATH>` | `CLAUDE_PROXY__LOGGING__LOG_PATH` | Directory for log files | (stdout only) |
+| `--log-rotation <ROTATION>` | `CLAUDE_PROXY__LOGGING__ROTATION` | Log rotation: `hourly`, `daily` | `daily` |
+| `--log-level <LEVEL>` | `CLAUDE_PROXY__LOGGING__LEVEL` | Log level: `trace`, `debug`, `info`, `warn`, `error` | `info` |
+| `--log-prefix <PREFIX>` | `CLAUDE_PROXY__LOGGING__LOG_PREFIX` | Prefix for log file names | `claude-proxy` |
+
+#### Example: Running without a config file
+
+```bash
+claude-proxy \
+  --upstream-url "https://your-resource.services.ai.azure.com" \
+  --client-api-key "your-client-key" \
+  --upstream-auth-type azure_cli
+```
+
+Or using environment variables:
+
+```bash
+export CLAUDE_PROXY__UPSTREAM_URL="https://your-resource.services.ai.azure.com"
+export CLAUDE_PROXY__CLIENT_API_KEY="your-client-key"
+export CLAUDE_PROXY__UPSTREAM_AUTH__TYPE="azure_cli"
+claude-proxy
 ```
 
 ## Running

@@ -49,6 +49,17 @@ api_key = "${UPSTREAM_API_KEY}"
 # # Default scope for Microsoft AI Foundry, no need to change
 # scope = "https://ai.azure.com/.default"
 
+# Option 4: Azure Managed Identity authentication
+# For use on Azure VMs, App Services, Container Instances, etc. with managed identity enabled
+# No secrets needed - uses the Azure Instance Metadata Service (IMDS)
+# [upstream_auth]
+# type = "azure_managed_identity"
+# # Optional: client_id for user-assigned managed identity
+# # If not specified, system-assigned managed identity is used
+# # client_id = "your-user-assigned-identity-client-id"
+# # Default resource for Microsoft AI Foundry, no need to change
+# resource = "https://ai.azure.com/.default"
+
 # Logging configuration (optional)
 # If this section is omitted, logs are written to stdout only at INFO level
 [logging]

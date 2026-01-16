@@ -174,6 +174,16 @@ pub struct AzureCliAuth {
     cached_token: Arc<RwLock<Option<CachedToken>>>,
 }
 
+/// Azure Managed Identity authentication - uses Azure Instance Metadata Service (IMDS)
+pub struct AzureManagedIdentityAuth {
+    /// Optional client ID for user-assigned managed identity
+    client_id: Option<String>,
+    /// The resource to request a token for
+    resource: String,
+    http_client: reqwest::Client,
+    cached_token: Arc<RwLock<Option<CachedToken>>>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AzureCliTokenResponse {
@@ -300,6 +310,129 @@ impl UpstreamAuth for AzureCliAuth {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct AzureManagedIdentityTokenResponse {
+    access_token: String,
+    expires_in: String,
+}
+
+impl AzureManagedIdentityAuth {
+    pub fn new(client_id: Option<String>, resource: String) -> Self {
+        Self {
+            client_id,
+            resource,
+            http_client: reqwest::Client::new(),
+            cached_token: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    async fn fetch_token(&self) -> Result<CachedToken, AuthError> {
+        // Azure IMDS endpoint for managed identity tokens
+        let mut url = format!(
+            "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource={}",
+            urlencoding::encode(&self.resource)
+        );
+
+        // Add client_id parameter for user-assigned managed identity
+        if let Some(ref client_id) = self.client_id {
+            url.push_str(&format!("&client_id={}", urlencoding::encode(client_id)));
+            info!(
+                "Acquiring token using user-assigned managed identity (client_id: {}) for resource: {}",
+                client_id, self.resource
+            );
+        } else {
+            info!(
+                "Acquiring token using system-assigned managed identity for resource: {}",
+                self.resource
+            );
+        }
+
+        let response = self
+            .http_client
+            .get(&url)
+            .header("Metadata", "true")
+            .send()
+            .await
+            .map_err(|e| {
+                AuthError::TokenAcquisition(format!(
+                    "Failed to contact Azure IMDS endpoint: {}. Ensure you're running on an Azure resource with managed identity enabled.",
+                    e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            error!(
+                "Azure managed identity token request failed with status {}: {}",
+                status, error_text
+            );
+            return Err(AuthError::TokenAcquisition(format!(
+                "Azure managed identity token request failed ({}): {}",
+                status, error_text
+            )));
+        }
+
+        let token_response: AzureManagedIdentityTokenResponse =
+            response.json().await.map_err(|e| {
+                AuthError::TokenAcquisition(format!(
+                    "Failed to parse Azure managed identity token response: {}",
+                    e
+                ))
+            })?;
+
+        // expires_in is returned as a string representing seconds
+        let expires_in_secs: i64 = token_response.expires_in.parse().unwrap_or(3600);
+
+        // Subtract 60 seconds buffer to ensure we refresh before expiry
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in_secs - 60);
+
+        debug!("Acquired managed identity token expiring at {}", expires_at);
+
+        Ok(CachedToken {
+            access_token: token_response.access_token,
+            expires_at,
+        })
+    }
+
+    async fn get_valid_token(&self) -> Result<String, AuthError> {
+        // Check if we have a valid cached token
+        {
+            let cached = self.cached_token.read().await;
+            if let Some(ref token) = *cached {
+                if token.expires_at > chrono::Utc::now() {
+                    return Ok(token.access_token.clone());
+                }
+            }
+        }
+
+        // Need to refresh the token
+        let new_token = self.fetch_token().await?;
+        let access_token = new_token.access_token.clone();
+
+        {
+            let mut cached = self.cached_token.write().await;
+            *cached = Some(new_token);
+        }
+
+        Ok(access_token)
+    }
+}
+
+#[async_trait]
+impl UpstreamAuth for AzureManagedIdentityAuth {
+    async fn get_auth_header(&self) -> Result<HeaderValue, AuthError> {
+        let token = self.get_valid_token().await?;
+        let header_value = format!("Bearer {}", token);
+        HeaderValue::from_str(&header_value)
+            .map_err(|e| AuthError::Config(format!("Invalid token format: {}", e)))
+    }
+
+    fn auth_header_name(&self) -> &'static str {
+        "authorization"
+    }
+}
+
 /// Create an upstream auth provider from configuration
 pub fn create_upstream_auth(config: &UpstreamAuthConfig) -> Arc<dyn UpstreamAuth> {
     match config {
@@ -316,5 +449,12 @@ pub fn create_upstream_auth(config: &UpstreamAuthConfig) -> Arc<dyn UpstreamAuth
             scope.clone(),
         )),
         UpstreamAuthConfig::AzureCli { scope } => Arc::new(AzureCliAuth::new(scope.clone())),
+        UpstreamAuthConfig::AzureManagedIdentity {
+            client_id,
+            resource,
+        } => Arc::new(AzureManagedIdentityAuth::new(
+            client_id.clone(),
+            resource.clone(),
+        )),
     }
 }

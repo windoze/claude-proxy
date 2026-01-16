@@ -169,6 +169,16 @@ pub enum UpstreamAuthConfig {
         #[serde(default = "default_azure_scope")]
         scope: String,
     },
+    /// Azure Managed Identity authentication (for Azure VMs, App Services, etc.)
+    AzureManagedIdentity {
+        /// Optional client ID for user-assigned managed identity.
+        /// If not specified, system-assigned managed identity is used.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// The resource/scope to request (defaults to "https://ai.azure.com/.default")
+        #[serde(default = "default_azure_scope")]
+        resource: String,
+    },
 }
 
 fn default_bind_address() -> String {
