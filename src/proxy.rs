@@ -33,6 +33,17 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
     "host",
+    "x-envoy-external-address",
+    "x-envoy-expected-rq-timeout-ms",
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "x-forwarded-path",
+    "x-k8se-app-name",
+    "x-k8se-app-namespace",
+    "x-k8se-app-kind",
+    "x-k8se-protocol",
+    "x-ms-containerapp-name",
+    "x-ms-containerapp-revision-name",
 ];
 
 /// Authentication-related headers
